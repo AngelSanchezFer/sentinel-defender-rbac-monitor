@@ -1,8 +1,8 @@
-# Sentinel + Defender RBAC Monitor
+# Sentinel Defender RBAC Monitor
 
-Tools and a deployable Microsoft Sentinel solution for monitoring **admin role
-changes** across Microsoft Defender XDR (Unified RBAC), Microsoft 365 delegated
-permission grants, and Entra ID directory roles.
+A deployable Microsoft Sentinel solution for monitoring **admin role changes**
+across Microsoft Defender XDR (Unified RBAC), Microsoft 365 delegated permission
+grants, and Entra ID directory roles.
 
 > Personal project, shared publicly. **Not an official Microsoft product.**
 > Provided as-is with no warranty or support. See [DISCLAIMER.md](DISCLAIMER.md).
@@ -12,8 +12,7 @@ permission grants, and Entra ID directory roles.
 | Component | Description |
 |---|---|
 | [`sentinel-role-change-solution/`](sentinel-role-change-solution/) | One-click deployable Microsoft Sentinel solution: workbook, KQL functions, scheduled analytics rules, and watchlists that monitor Defender XDR / Entra / URBAC admin role changes. |
-| [`rbac-audit/`](rbac-audit/) | PowerShell scripts to audit Defender XDR Unified RBAC + Entra directory-role permission changes from the M365 unified audit log and the Entra ID audit log. |
-| [`docs/`](docs/defender-rbac-design.md) | Design guidance for Defender RBAC change monitoring. |
+| [`docs/`](docs/defender-rbac-design.md) | Design guidance for Defender XDR RBAC. |
 
 ## Coverage
 
@@ -29,25 +28,14 @@ risk), a configurable time range, and click-through drill-downs in the workbook.
 
 ## Quick start
 
-### Deploy the Sentinel solution
 One-click **Deploy to Azure**, or via Azure CLI — see
 [sentinel-role-change-solution/README.md](sentinel-role-change-solution/README.md).
 
-### Audit RBAC changes with PowerShell
-```powershell
-cd rbac-audit
-# Who has admin access right now + recent changes
-.\Get-AdminAccessReport.ps1 -Days 30 -IncludeEntraRoles
-```
-
 ## Prerequisites
 
-- An existing Log Analytics workspace with Microsoft Sentinel enabled (for the
-  Sentinel solution).
-- PowerShell 5.1+ or 7+, plus the `ExchangeOnlineManagement` and
-  `Microsoft.Graph` modules (for the audit scripts).
-- Appropriate read permissions in the target tenant
-  (`AuditLog.Read.All`, `Directory.Read.All`, View-Only Audit Logs).
+- An existing Log Analytics workspace with Microsoft Sentinel enabled.
+- Permissions to deploy Sentinel content: saved searches (functions),
+  watchlists, scheduled analytics rules, and workbooks.
 
 ## Contributing
 

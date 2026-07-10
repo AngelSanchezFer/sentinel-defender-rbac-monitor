@@ -16,7 +16,7 @@ Thanks for your interest in improving this toolkit.
 
 1. Fork the repo and create a feature branch (`feature/my-tool`).
 2. Follow the existing structure — organize by tool in a top-level folder
-   (e.g., `rbac-audit/`, `sentinel-role-change-solution/`), each with its own README.
+   (e.g., `sentinel-role-change-solution/`), each with its own README.
 3. Include a `README.md` in any new tool folder covering: purpose, prerequisites,
    parameters, usage examples, and sanitized sample output.
 4. Open a pull request with a clear description of what the tool does and how you

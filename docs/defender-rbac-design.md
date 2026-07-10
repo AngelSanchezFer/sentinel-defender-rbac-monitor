@@ -53,8 +53,8 @@ access after the switch.
 
 - **Entra groups** for assignment → fewer moving parts, easier reviews.
 - **PIM** for just-in-time elevation + access reviews on privileged roles.
-- **Audit** RBAC changes routinely — see
-  [`Get-DefenderRbacChanges.ps1`](../rbac-audit/) for an automated pull.
+- **Monitor** RBAC changes continuously — deploy the
+  [Sentinel role-change solution](../sentinel-role-change-solution/) in this repo.
 
 ---
 
