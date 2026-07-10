@@ -1,0 +1,221 @@
+{
+  "version": "Notebook/1.0",
+  "items": [
+    {
+      "type": 1,
+      "content": {
+        "json": "# Defender XDR Admin Role Change Monitoring\n\nTracks admin role changes across three sources: Entra directory roles (RoleManagement), Microsoft 365 delegated permission grants, and Defender XDR Unified RBAC (URBAC) custom roles/assignments. Highlights high-risk, permanent (non-PIM), and external/guest activity."
+      },
+      "name": "text-intro"
+    },
+    {
+      "type": 9,
+      "content": {
+        "version": "KqlParameterItem/1.0",
+        "parameters": [
+          {
+            "id": "f1e2d3c4-b5a6-4790-8123-000000000001",
+            "version": "KqlParameterItem/1.0",
+            "name": "TimeRange",
+            "label": "Time range",
+            "type": 2,
+            "isRequired": true,
+            "typeSettings": {
+              "additionalResourceOptions": []
+            },
+            "jsonData": "[{\"value\":\"1d\",\"label\":\"Last 1 day\"},{\"value\":\"7d\",\"label\":\"Last 7 days\",\"selected\":true},{\"value\":\"15d\",\"label\":\"Last 15 days\"},{\"value\":\"30d\",\"label\":\"Last 30 days\"},{\"value\":\"60d\",\"label\":\"Last 60 days\"},{\"value\":\"90d\",\"label\":\"Last 90 days\"}]"
+          }
+        ],
+        "style": "pills",
+        "queryType": 0
+      },
+      "name": "parameters-timerange"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "let d = fxdr_role_changes_normalized({TimeRange});\nunion\n (d | summarize Value=count() | extend Name=\"Total changes\", o=1),\n (d | summarize Value=countif(RiskLevel == \"High\") | extend Name=\"High-risk\", o=2),\n (d | summarize Value=countif(Operation contains \"outside of PIM\") | extend Name=\"Permanent (non-PIM)\", o=3),\n (d | summarize Value=countif(ActorUPN contains \"#EXT#\" or TargetIdentity contains \"#EXT#\") | extend Name=\"External / guest\", o=4),\n (d | summarize Value=countif(Provider == \"DefenderXDR\") | extend Name=\"URBAC role ops\", o=5)\n| order by o asc\n| project Name, Value",
+        "size": 3,
+        "title": "Key indicators — Last {TimeRange}",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "tiles",
+        "tileSettings": {
+          "titleContent": { "columnMatch": "Name", "formatter": 1 },
+          "leftContent": { "columnMatch": "Value", "formatter": 12, "formatOptions": { "palette": "auto" } },
+          "showBorder": true
+        }
+      },
+      "name": "kpi-tiles"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "fxdr_role_changes_normalized({TimeRange})\n| summarize Changes=count() by bin(TimeGenerated, 1d), RiskLevel\n| order by TimeGenerated asc",
+        "size": 0,
+        "title": "Role changes over time — Last {TimeRange}",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "timechart"
+      },
+      "name": "trend-timechart"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "fxdr_role_changes_normalized({TimeRange})\n| summarize TotalChanges=count(), HighRiskChanges=countif(RiskLevel == \"High\"), DistinctActors=dcount(ActorUPN), DistinctTargets=dcount(TargetIdentity) by Provider\n| order by HighRiskChanges desc",
+        "size": 0,
+        "title": "Role Change Summary — Last {TimeRange} (select a row to see the changes)",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "exportFieldName": "Provider",
+        "exportParameterName": "SelectedProvider",
+        "exportDefaultValue": ""
+      },
+      "name": "summary-grid"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "fxdr_role_changes_normalized({TimeRange})\n| where \"{SelectedProvider}\" == \"\" or Provider == \"{SelectedProvider}\"\n| project TimeGenerated, Provider, Operation, RoleName, Actor, ActorUPN, TargetIdentity, RiskLevel, Result\n| order by TimeGenerated desc",
+        "size": 0,
+        "title": "Role Change Details — Last {TimeRange}",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces"
+      },
+      "name": "detail-grid"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "fxdr_role_changes_normalized({TimeRange})\n| summarize Changes=count() by Actor\n| top 10 by Changes desc",
+        "size": 1,
+        "title": "Top actors — Last {TimeRange}",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "barchart"
+      },
+      "name": "top-actors"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "fxdr_role_changes_normalized({TimeRange})\n| where RoleName != \"Unknown\"\n| summarize Changes=count() by RoleName\n| top 10 by Changes desc",
+        "size": 1,
+        "title": "Top roles — Last {TimeRange}",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "barchart"
+      },
+      "name": "top-roles"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "fxdr_role_changes_normalized({TimeRange})\n| summarize Changes=count() by Operation\n| top 15 by Changes desc",
+        "size": 1,
+        "title": "Operations breakdown — Last {TimeRange}",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "barchart"
+      },
+      "name": "operations-breakdown"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "fxdr_role_changes_normalized({TimeRange})\n| where ActorUPN contains \"#EXT#\" or TargetIdentity contains \"#EXT#\"\n| project TimeGenerated, Provider, Operation, RoleName, Actor, ActorUPN, TargetIdentity, RiskLevel\n| order by TimeGenerated desc",
+        "size": 0,
+        "title": "External / guest accounts in role changes — Last {TimeRange}",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces"
+      },
+      "name": "external-guest-grid"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "fxdr_role_changes_normalized({TimeRange})\n| where Operation contains \"outside of PIM\"\n| project TimeGenerated, Provider, Operation, RoleName, Actor, ActorUPN, TargetIdentity, RiskLevel\n| order by TimeGenerated desc",
+        "size": 0,
+        "title": "Permanent (non-PIM) privileged grants — Last {TimeRange}",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces"
+      },
+      "name": "permanent-nonpim-grid"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "fxdr_role_changes_normalized({TimeRange})\n| where Provider == \"DefenderXDR\"\n| extend RoleDefId = tostring(todynamic(AdditionalData).RoleDefinitionId)\n| extend Permissions = todynamic(AdditionalData).AddedRolePermission\n| join kind=leftouter (_GetWatchlist(\"urbac-role-names\") | project WLId=tostring(column_ifexists(\"RoleDefinitionId\", \"\")), WLName=tostring(column_ifexists(\"RoleName\", \"\"))) on $left.RoleDefId == $right.WLId\n| extend RoleName = coalesce(WLName, strcat(\"URBAC role \", RoleDefId))\n| project TimeGenerated, Operation, Actor, ActorUPN, ActorIp, RoleName, RoleDefId, TargetIdentity, Permissions\n| order by TimeGenerated desc",
+        "size": 0,
+        "title": "Defender XDR Unified RBAC (URBAC) changes — Last {TimeRange}",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces"
+      },
+      "name": "urbac-grid"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "fxdr_role_changes_normalized({TimeRange})\n| where isnotempty(ActorIp)\n| summarize Changes=count(), DistinctActors=dcount(ActorUPN), Roles=make_set(RoleName, 8), LastSeen=max(TimeGenerated) by ActorIp\n| order by Changes desc",
+        "size": 0,
+        "title": "Role changes by source IP — Last {TimeRange}",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces"
+      },
+      "name": "source-ip-grid"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "let actors = fxdr_role_changes_normalized({TimeRange}) | where isnotempty(ActorUPN) | distinct AUPN=tolower(ActorUPN);\nSigninLogs\n| where TimeGenerated > ago({TimeRange})\n| where tolower(UserPrincipalName) in (actors)\n| summarize SignIns=count(), MFAUsed=countif(AuthenticationRequirement == \"multiFactorAuthentication\"), SingleFactor=countif(AuthenticationRequirement == \"singleFactorAuthentication\"), RiskySignIns=countif(RiskLevelDuringSignIn in (\"high\", \"medium\", \"low\")), AtRisk=countif(RiskState == \"atRisk\"), LastSignIn=max(TimeGenerated) by UserPrincipalName\n| order by RiskySignIns desc, SingleFactor desc",
+        "size": 0,
+        "title": "Sign-in posture of role-change actors (MFA / risk) — Last {TimeRange}",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces"
+      },
+      "name": "signin-posture-grid"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "fxdr_role_changes_high_risk({TimeRange})\n| project TimeGenerated, Provider, Operation, RoleName, Actor, ActorUPN, TargetIdentity, Result\n| order by TimeGenerated desc",
+        "size": 0,
+        "title": "High-Risk Role Changes by Unapproved Actors",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces"
+      },
+      "name": "high-risk-grid"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "fxdr_role_change_actor_baseline({TimeRange})\n| take 50",
+        "size": 0,
+        "title": "Actor Baseline",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces"
+      },
+      "name": "baseline-grid"
+    }
+  ],
+  "isLocked": false,
+  "fallbackResourceIds": [
+    "Azure Monitor"
+  ]
+}
+

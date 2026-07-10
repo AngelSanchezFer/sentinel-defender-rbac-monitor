@@ -1,0 +1,9 @@
+// Deployed as a parameterized function: fxdr_role_change_actor_baseline(lookback:timespan=30d)
+fxdr_role_changes_normalized(lookback)
+| summarize
+    TotalRoleChanges = count(),
+    DistinctTargets = dcount(TargetIdentity),
+    LastSeen = max(TimeGenerated)
+    by Actor, ActorUPN, Provider
+| order by TotalRoleChanges desc
+

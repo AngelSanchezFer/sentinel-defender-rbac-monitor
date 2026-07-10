@@ -1,0 +1,111 @@
+// fxdr_role_changes_normalized
+// Normalizes Defender XDR / Entra admin role change activity into a single schema.
+//
+// Sources (validated against live Sentinel data):
+//   1. AuditLogs (Category == "RoleManagement") - authoritative directory role changes,
+//      including the Entra roles that grant Defender XDR admin access and all PIM activity.
+//   2. CloudAppEvents (Application == "Microsoft 365", delegated permission grants) -
+//      app-consent privilege escalation not represented in RoleManagement.
+//
+// Output columns: TimeGenerated, SourceTable, Provider, Operation, Actor, ActorUPN,
+//                 ActorIp, TargetIdentity, RoleName, Result, AADOperationType,
+//                 CorrelationId, AdditionalData, RiskLevel
+// Deployed as a parameterized function: fxdr_role_changes_normalized(lookback:timespan=30d)
+let highRiskRoles = dynamic([
+  "Global Administrator",
+  "Privileged Role Administrator",
+  "Privileged Authentication Administrator",
+  "Security Administrator",
+  "Security Operator",
+  "Exchange Administrator",
+  "Hybrid Identity Administrator",
+  "Application Administrator",
+  "Cloud Application Administrator"
+]);
+// Primary source: Entra directory role changes (RoleManagement).
+let entraRoleChanges =
+    AuditLogs
+    | where TimeGenerated >= ago(lookback)
+    | where Category == "RoleManagement"
+    | extend InitiatedByUpn = tostring(InitiatedBy.user.userPrincipalName),
+             InitiatedByApp = tostring(InitiatedBy.app.displayName),
+             ActorDisplay = tostring(InitiatedBy.user.displayName),
+             ActorIp = tostring(InitiatedBy.user.ipAddress)
+    // TargetResources is an array; extract the Role and the target User by type
+    // (never by position - positional indexing is not stable across operations).
+    | mv-apply tr = TargetResources on (
+        summarize
+            RoleName = anyif(tostring(tr.displayName), tostring(tr.type) == "Role"),
+            TargetUpn = anyif(tostring(tr.userPrincipalName), tostring(tr.type) == "User" and isnotempty(tostring(tr.userPrincipalName))),
+            TargetName = anyif(tostring(tr.displayName), tostring(tr.type) == "User")
+      )
+    | project
+        TimeGenerated,
+        SourceTable = "AuditLogs",
+        Provider = "EntraID",
+        Operation = OperationName,
+        Actor = coalesce(ActorDisplay, InitiatedByUpn, InitiatedByApp, "Unknown"),
+        ActorUPN = coalesce(InitiatedByUpn, InitiatedByApp, ""),
+        ActorIp,
+        TargetIdentity = coalesce(TargetUpn, TargetName, ""),
+        RoleName = coalesce(RoleName, ""),
+        Result = tostring(Result),
+        AADOperationType = tostring(AADOperationType),
+        CorrelationId = tostring(CorrelationId),
+        AdditionalData = tostring(TargetResources);
+// Secondary source: Microsoft 365 delegated permission grants (app consent).
+let permissionGrants =
+    CloudAppEvents
+    | where TimeGenerated >= ago(lookback)
+    | where Application == "Microsoft 365" and ActionType has "delegated permission grant"
+    | extend ActorArr = todynamic(RawEventData).Actor
+    // In the unified audit Actor array, Type == 5 is the user principal name.
+    | mv-apply a = ActorArr on (
+        summarize ActorUpnX = anyif(tostring(a.ID), toint(a.Type) == 5)
+      )
+    | project
+        TimeGenerated,
+        SourceTable = "CloudAppEvents",
+        Provider = "M365Defender",
+        Operation = ActionType,
+        Actor = coalesce(AccountDisplayName, ActorUpnX, ""),
+        ActorUPN = coalesce(ActorUpnX, tostring(AccountObjectId), ""),
+        ActorIp = tostring(IPAddress),
+        TargetIdentity = tostring(ObjectName),
+        RoleName = "Delegated permission grant",
+        Result = "success",
+        AADOperationType = tostring(ActionType),
+        CorrelationId = tostring(todynamic(RawEventData).Id),
+        AdditionalData = tostring(RawEventData);
+// Third source: Defender XDR Unified RBAC (URBAC) custom role + assignment changes.
+// These land in CloudAppEvents (Workload == "URBAC", RecordType 302/303), NOT in the
+// Entra RoleManagement audit. The friendly role name is not in the log - only the
+// RoleDefinitionId / RoleAssignmentId GUIDs (resolvable in the Defender portal).
+let urbacRoleChanges =
+    CloudAppEvents
+    | where TimeGenerated >= ago(lookback)
+    | where ActionType in ("CreateRole", "UpdateRole", "DeleteRole", "CreateAssignment", "UpdateAssignment", "DeleteAssignment")
+    | where tostring(RawEventData.Workload) == "URBAC"
+    | project
+        TimeGenerated,
+        SourceTable = "CloudAppEvents",
+        Provider = "DefenderXDR",
+        Operation = ActionType,
+        Actor = coalesce(AccountDisplayName, tostring(RawEventData.UserId), ""),
+        ActorUPN = tostring(RawEventData.UserId),
+        ActorIp = tostring(RawEventData.ClientIP),
+        TargetIdentity = coalesce(tostring(RawEventData.RoleAssignmentId), tostring(RawEventData.RoleDefinitionId), ""),
+        RoleName = strcat("URBAC role ", tostring(RawEventData.RoleDefinitionId)),
+        Result = "success",
+        AADOperationType = ActionType,
+        CorrelationId = tostring(RawEventData.Id),
+        AdditionalData = tostring(RawEventData);
+union isfuzzy=true entraRoleChanges, permissionGrants, urbacRoleChanges
+| extend RoleName = iff(isempty(RoleName), "Unknown", RoleName)
+// URBAC role/assignment creation & updates grant Defender XDR admin access - always High.
+| extend RiskLevel = case(
+    RoleName has_any (highRiskRoles), "High",
+    Provider == "DefenderXDR" and Operation in ("CreateRole", "UpdateRole", "CreateAssignment", "UpdateAssignment"), "High",
+    "Normal")
+| order by TimeGenerated desc
+

@@ -1,0 +1,14 @@
+// Deployed as a parameterized function: fxdr_role_changes_high_risk(lookback:timespan=30d)
+let approvedAdmins =
+    _GetWatchlist("approved-defender-admins")
+    | project ApprovedAdmin = tolower(trim(" ", tostring(SearchKey)));
+fxdr_role_changes_normalized(lookback)
+| extend ActorUPNNormalized = tolower(trim(" ", tostring(ActorUPN)))
+| where RiskLevel == "High"
+// Exclude automated PIM activation-expiry cleanups (not operator-initiated escalations).
+| where Operation !has "expired"
+| join kind=leftouter approvedAdmins on $left.ActorUPNNormalized == $right.ApprovedAdmin
+| extend IsApprovedActor = iif(isnotempty(ApprovedAdmin), true, false)
+| where IsApprovedActor == false
+| project TimeGenerated, Provider, Operation, Actor, ActorUPN, TargetIdentity, RoleName, RiskLevel, Result, CorrelationId, AdditionalData
+

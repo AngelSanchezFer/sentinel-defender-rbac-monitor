@@ -1,0 +1,284 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "workspaceName": {
+      "type": "string",
+      "metadata": {
+        "description": "Name of the Microsoft Sentinel (Log Analytics) workspace."
+      }
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]",
+      "metadata": {
+        "description": "Location for workbook resource."
+      }
+    },
+    "workbookDisplayName": {
+      "type": "string",
+      "defaultValue": "Defender XDR Admin Role Change Monitoring",
+      "metadata": {
+        "description": "Display name for the Sentinel workbook."
+      }
+    },
+    "deployAnalyticsRules": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "Deploy scheduled analytics rules."
+      }
+    },
+    "deployWatchlists": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "Deploy Sentinel watchlist scaffolding."
+      }
+    },
+    "highRiskRoles": {
+      "type": "array",
+      "defaultValue": [
+        "Global Administrator",
+        "Security Administrator",
+        "Privileged Role Administrator",
+        "Defender XDR Security Administrator",
+        "Exchange Administrator"
+      ],
+      "metadata": {
+        "description": "High-risk roles included in the normalization function risk scoring."
+      }
+    }
+  },
+  "variables": {
+    "workbookResourceName": "[guid(subscription().id, resourceGroup().id, parameters('workspaceName'), 'fxdr-role-change-workbook')]",
+    "functionNormalizedName": "fxdr-role-changes-normalized",
+    "functionHighRiskName": "fxdr-role-changes-high-risk",
+    "functionBaselineName": "fxdr-role-change-actor-baseline",
+    "watchlistApprovedAdminsAlias": "approved-defender-admins",
+    "watchlistMaintenanceAlias": "approved-maintenance-window",
+    "watchlistUrbacNamesAlias": "urbac-role-names",
+    "ruleUnapprovedHighRiskName": "[guid(resourceGroup().id, parameters('workspaceName'), 'fxdr-unapproved-high-risk-rule')]",
+    "ruleOutsideWindowName": "[guid(resourceGroup().id, parameters('workspaceName'), 'fxdr-outside-window-rule')]",
+    "normalizedFunctionQuery": "[concat('let highRiskRoles = dynamic(', string(parameters('highRiskRoles')), '); let entraRoleChanges = AuditLogs | where TimeGenerated >= ago(lookback) | where Category == \"RoleManagement\" | extend InitiatedByUpn = tostring(InitiatedBy.user.userPrincipalName), InitiatedByApp = tostring(InitiatedBy.app.displayName), ActorDisplay = tostring(InitiatedBy.user.displayName), ActorIp = tostring(InitiatedBy.user.ipAddress) | mv-apply tr = TargetResources on ( summarize RoleName = anyif(tostring(tr.displayName), tostring(tr.type) == \"Role\"), TargetUpn = anyif(tostring(tr.userPrincipalName), tostring(tr.type) == \"User\" and isnotempty(tostring(tr.userPrincipalName))), TargetName = anyif(tostring(tr.displayName), tostring(tr.type) == \"User\") ) | project TimeGenerated, SourceTable = \"AuditLogs\", Provider = \"EntraID\", Operation = OperationName, Actor = coalesce(ActorDisplay, InitiatedByUpn, InitiatedByApp, \"Unknown\"), ActorUPN = coalesce(InitiatedByUpn, InitiatedByApp, \"\"), ActorIp, TargetIdentity = coalesce(TargetUpn, TargetName, \"\"), RoleName = coalesce(RoleName, \"\"), Result = tostring(Result), AADOperationType = tostring(AADOperationType), CorrelationId = tostring(CorrelationId), AdditionalData = tostring(TargetResources); let permissionGrants = CloudAppEvents | where TimeGenerated >= ago(lookback) | where Application == \"Microsoft 365\" and ActionType has \"delegated permission grant\" | extend ActorArr = todynamic(RawEventData).Actor | mv-apply a = ActorArr on ( summarize ActorUpnX = anyif(tostring(a.ID), toint(a.Type) == 5) ) | project TimeGenerated, SourceTable = \"CloudAppEvents\", Provider = \"M365Defender\", Operation = ActionType, Actor = coalesce(AccountDisplayName, ActorUpnX, \"\"), ActorUPN = coalesce(ActorUpnX, tostring(AccountObjectId), \"\"), ActorIp = tostring(IPAddress), TargetIdentity = tostring(ObjectName), RoleName = \"Delegated permission grant\", Result = \"success\", AADOperationType = tostring(ActionType), CorrelationId = tostring(todynamic(RawEventData).Id), AdditionalData = tostring(RawEventData); let urbacRoleChanges = CloudAppEvents | where TimeGenerated >= ago(lookback) | where ActionType in (\"CreateRole\", \"UpdateRole\", \"DeleteRole\", \"CreateAssignment\", \"UpdateAssignment\", \"DeleteAssignment\") | where tostring(RawEventData.Workload) == \"URBAC\" | project TimeGenerated, SourceTable = \"CloudAppEvents\", Provider = \"DefenderXDR\", Operation = ActionType, Actor = coalesce(AccountDisplayName, tostring(RawEventData.UserId), \"\"), ActorUPN = tostring(RawEventData.UserId), ActorIp = tostring(RawEventData.ClientIP), TargetIdentity = coalesce(tostring(RawEventData.RoleAssignmentId), tostring(RawEventData.RoleDefinitionId), \"\"), RoleName = strcat(\"URBAC role \", tostring(RawEventData.RoleDefinitionId)), Result = \"success\", AADOperationType = ActionType, CorrelationId = tostring(RawEventData.Id), AdditionalData = tostring(RawEventData); union isfuzzy=true entraRoleChanges, permissionGrants, urbacRoleChanges | extend RoleName = iff(isempty(RoleName), \"Unknown\", RoleName) | extend RiskLevel = case(RoleName has_any (highRiskRoles), \"High\", Provider == \"DefenderXDR\" and Operation in (\"CreateRole\", \"UpdateRole\", \"CreateAssignment\", \"UpdateAssignment\"), \"High\", \"Normal\") | order by TimeGenerated desc')]",
+    "highRiskFunctionQuery": "[concat('let approvedAdmins = _GetWatchlist(\"', variables('watchlistApprovedAdminsAlias'), '\") | project ApprovedAdmin = tolower(trim(\" \", tostring(SearchKey))); fxdr_role_changes_normalized(lookback) | extend ActorUPNNormalized = tolower(trim(\" \", tostring(ActorUPN))) | where RiskLevel == \"High\" | where Operation !has \"expired\" | join kind=leftouter approvedAdmins on $left.ActorUPNNormalized == $right.ApprovedAdmin | extend IsApprovedActor = iif(isnotempty(ApprovedAdmin), true, false) | where IsApprovedActor == false | project TimeGenerated, Provider, Operation, Actor, ActorUPN, TargetIdentity, RoleName, RiskLevel, Result, CorrelationId, AdditionalData')]",
+    "baselineFunctionQuery": "fxdr_role_changes_normalized(lookback) | summarize TotalRoleChanges=count(), DistinctTargets=dcount(TargetIdentity), LastSeen=max(TimeGenerated) by Actor, ActorUPN, Provider | order by TotalRoleChanges desc",
+    "workbookSerializedData": "{\"version\":\"Notebook/1.0\",\"items\":[{\"type\":1,\"content\":{\"json\":\"# Defender XDR Admin Role Change Monitoring\\n\\nTracks admin role changes across three sources: Entra directory roles (RoleManagement), Microsoft 365 delegated permission grants, and Defender XDR Unified RBAC (URBAC) custom roles/assignments. Highlights high-risk, permanent (non-PIM), and external/guest activity.\"},\"name\":\"text-intro\"},{\"type\":9,\"content\":{\"version\":\"KqlParameterItem/1.0\",\"parameters\":[{\"id\":\"f1e2d3c4-b5a6-4790-8123-000000000001\",\"version\":\"KqlParameterItem/1.0\",\"name\":\"TimeRange\",\"label\":\"Time range\",\"type\":2,\"isRequired\":true,\"typeSettings\":{\"additionalResourceOptions\":[]},\"jsonData\":\"[{\\\"value\\\":\\\"1d\\\",\\\"label\\\":\\\"Last 1 day\\\"},{\\\"value\\\":\\\"7d\\\",\\\"label\\\":\\\"Last 7 days\\\",\\\"selected\\\":true},{\\\"value\\\":\\\"15d\\\",\\\"label\\\":\\\"Last 15 days\\\"},{\\\"value\\\":\\\"30d\\\",\\\"label\\\":\\\"Last 30 days\\\"},{\\\"value\\\":\\\"60d\\\",\\\"label\\\":\\\"Last 60 days\\\"},{\\\"value\\\":\\\"90d\\\",\\\"label\\\":\\\"Last 90 days\\\"}]\"}],\"style\":\"pills\",\"queryType\":0},\"name\":\"parameters-timerange\"},{\"type\":3,\"content\":{\"version\":\"KqlItem/1.0\",\"query\":\"let d = fxdr_role_changes_normalized({TimeRange});\\nunion\\n (d | summarize Value=count() | extend Name=\\\"Total changes\\\", o=1),\\n (d | summarize Value=countif(RiskLevel == \\\"High\\\") | extend Name=\\\"High-risk\\\", o=2),\\n (d | summarize Value=countif(Operation contains \\\"outside of PIM\\\") | extend Name=\\\"Permanent (non-PIM)\\\", o=3),\\n (d | summarize Value=countif(ActorUPN contains \\\"#EXT#\\\" or TargetIdentity contains \\\"#EXT#\\\") | extend Name=\\\"External / guest\\\", o=4),\\n (d | summarize Value=countif(Provider == \\\"DefenderXDR\\\") | extend Name=\\\"URBAC role ops\\\", o=5)\\n| order by o asc\\n| project Name, Value\",\"size\":3,\"title\":\"Key indicators — Last {TimeRange}\",\"queryType\":0,\"resourceType\":\"microsoft.operationalinsights/workspaces\",\"visualization\":\"tiles\",\"tileSettings\":{\"titleContent\":{\"columnMatch\":\"Name\",\"formatter\":1},\"leftContent\":{\"columnMatch\":\"Value\",\"formatter\":12,\"formatOptions\":{\"palette\":\"auto\"}},\"showBorder\":true}},\"name\":\"kpi-tiles\"},{\"type\":3,\"content\":{\"version\":\"KqlItem/1.0\",\"query\":\"fxdr_role_changes_normalized({TimeRange})\\n| summarize Changes=count() by bin(TimeGenerated, 1d), RiskLevel\\n| order by TimeGenerated asc\",\"size\":0,\"title\":\"Role changes over time — Last {TimeRange}\",\"queryType\":0,\"resourceType\":\"microsoft.operationalinsights/workspaces\",\"visualization\":\"timechart\"},\"name\":\"trend-timechart\"},{\"type\":3,\"content\":{\"version\":\"KqlItem/1.0\",\"query\":\"fxdr_role_changes_normalized({TimeRange})\\n| summarize TotalChanges=count(), HighRiskChanges=countif(RiskLevel == \\\"High\\\"), DistinctActors=dcount(ActorUPN), DistinctTargets=dcount(TargetIdentity) by Provider\\n| order by HighRiskChanges desc\",\"size\":0,\"title\":\"Role Change Summary — Last {TimeRange} (select a row to see the changes)\",\"queryType\":0,\"resourceType\":\"microsoft.operationalinsights/workspaces\",\"exportFieldName\":\"Provider\",\"exportParameterName\":\"SelectedProvider\",\"exportDefaultValue\":\"\"},\"name\":\"summary-grid\"},{\"type\":3,\"content\":{\"version\":\"KqlItem/1.0\",\"query\":\"fxdr_role_changes_normalized({TimeRange})\\n| where \\\"{SelectedProvider}\\\" == \\\"\\\" or Provider == \\\"{SelectedProvider}\\\"\\n| project TimeGenerated, Provider, Operation, RoleName, Actor, ActorUPN, TargetIdentity, RiskLevel, Result\\n| order by TimeGenerated desc\",\"size\":0,\"title\":\"Role Change Details — Last {TimeRange}\",\"queryType\":0,\"resourceType\":\"microsoft.operationalinsights/workspaces\"},\"name\":\"detail-grid\"},{\"type\":3,\"content\":{\"version\":\"KqlItem/1.0\",\"query\":\"fxdr_role_changes_normalized({TimeRange})\\n| summarize Changes=count() by Actor\\n| top 10 by Changes desc\",\"size\":1,\"title\":\"Top actors — Last {TimeRange}\",\"queryType\":0,\"resourceType\":\"microsoft.operationalinsights/workspaces\",\"visualization\":\"barchart\"},\"name\":\"top-actors\"},{\"type\":3,\"content\":{\"version\":\"KqlItem/1.0\",\"query\":\"fxdr_role_changes_normalized({TimeRange})\\n| where RoleName != \\\"Unknown\\\"\\n| summarize Changes=count() by RoleName\\n| top 10 by Changes desc\",\"size\":1,\"title\":\"Top roles — Last {TimeRange}\",\"queryType\":0,\"resourceType\":\"microsoft.operationalinsights/workspaces\",\"visualization\":\"barchart\"},\"name\":\"top-roles\"},{\"type\":3,\"content\":{\"version\":\"KqlItem/1.0\",\"query\":\"fxdr_role_changes_normalized({TimeRange})\\n| summarize Changes=count() by Operation\\n| top 15 by Changes desc\",\"size\":1,\"title\":\"Operations breakdown — Last {TimeRange}\",\"queryType\":0,\"resourceType\":\"microsoft.operationalinsights/workspaces\",\"visualization\":\"barchart\"},\"name\":\"operations-breakdown\"},{\"type\":3,\"content\":{\"version\":\"KqlItem/1.0\",\"query\":\"fxdr_role_changes_normalized({TimeRange})\\n| where ActorUPN contains \\\"#EXT#\\\" or TargetIdentity contains \\\"#EXT#\\\"\\n| project TimeGenerated, Provider, Operation, RoleName, Actor, ActorUPN, TargetIdentity, RiskLevel\\n| order by TimeGenerated desc\",\"size\":0,\"title\":\"External / guest accounts in role changes — Last {TimeRange}\",\"queryType\":0,\"resourceType\":\"microsoft.operationalinsights/workspaces\"},\"name\":\"external-guest-grid\"},{\"type\":3,\"content\":{\"version\":\"KqlItem/1.0\",\"query\":\"fxdr_role_changes_normalized({TimeRange})\\n| where Operation contains \\\"outside of PIM\\\"\\n| project TimeGenerated, Provider, Operation, RoleName, Actor, ActorUPN, TargetIdentity, RiskLevel\\n| order by TimeGenerated desc\",\"size\":0,\"title\":\"Permanent (non-PIM) privileged grants — Last {TimeRange}\",\"queryType\":0,\"resourceType\":\"microsoft.operationalinsights/workspaces\"},\"name\":\"permanent-nonpim-grid\"},{\"type\":3,\"content\":{\"version\":\"KqlItem/1.0\",\"query\":\"fxdr_role_changes_normalized({TimeRange})\\n| where Provider == \\\"DefenderXDR\\\"\\n| extend RoleDefId = tostring(todynamic(AdditionalData).RoleDefinitionId)\\n| extend Permissions = todynamic(AdditionalData).AddedRolePermission\\n| join kind=leftouter (_GetWatchlist(\\\"urbac-role-names\\\") | project WLId=tostring(column_ifexists(\\\"RoleDefinitionId\\\", \\\"\\\")), WLName=tostring(column_ifexists(\\\"RoleName\\\", \\\"\\\"))) on $left.RoleDefId == $right.WLId\\n| extend RoleName = coalesce(WLName, strcat(\\\"URBAC role \\\", RoleDefId))\\n| project TimeGenerated, Operation, Actor, ActorUPN, ActorIp, RoleName, RoleDefId, TargetIdentity, Permissions\\n| order by TimeGenerated desc\",\"size\":0,\"title\":\"Defender XDR Unified RBAC (URBAC) changes — Last {TimeRange}\",\"queryType\":0,\"resourceType\":\"microsoft.operationalinsights/workspaces\"},\"name\":\"urbac-grid\"},{\"type\":3,\"content\":{\"version\":\"KqlItem/1.0\",\"query\":\"fxdr_role_changes_normalized({TimeRange})\\n| where isnotempty(ActorIp)\\n| summarize Changes=count(), DistinctActors=dcount(ActorUPN), Roles=make_set(RoleName, 8), LastSeen=max(TimeGenerated) by ActorIp\\n| order by Changes desc\",\"size\":0,\"title\":\"Role changes by source IP — Last {TimeRange}\",\"queryType\":0,\"resourceType\":\"microsoft.operationalinsights/workspaces\"},\"name\":\"source-ip-grid\"},{\"type\":3,\"content\":{\"version\":\"KqlItem/1.0\",\"query\":\"let actors = fxdr_role_changes_normalized({TimeRange}) | where isnotempty(ActorUPN) | distinct AUPN=tolower(ActorUPN);\\nSigninLogs\\n| where TimeGenerated > ago({TimeRange})\\n| where tolower(UserPrincipalName) in (actors)\\n| summarize SignIns=count(), MFAUsed=countif(AuthenticationRequirement == \\\"multiFactorAuthentication\\\"), SingleFactor=countif(AuthenticationRequirement == \\\"singleFactorAuthentication\\\"), RiskySignIns=countif(RiskLevelDuringSignIn in (\\\"high\\\", \\\"medium\\\", \\\"low\\\")), AtRisk=countif(RiskState == \\\"atRisk\\\"), LastSignIn=max(TimeGenerated) by UserPrincipalName\\n| order by RiskySignIns desc, SingleFactor desc\",\"size\":0,\"title\":\"Sign-in posture of role-change actors (MFA / risk) — Last {TimeRange}\",\"queryType\":0,\"resourceType\":\"microsoft.operationalinsights/workspaces\"},\"name\":\"signin-posture-grid\"},{\"type\":3,\"content\":{\"version\":\"KqlItem/1.0\",\"query\":\"fxdr_role_changes_high_risk({TimeRange})\\n| project TimeGenerated, Provider, Operation, RoleName, Actor, ActorUPN, TargetIdentity, Result\\n| order by TimeGenerated desc\",\"size\":0,\"title\":\"High-Risk Role Changes by Unapproved Actors\",\"queryType\":0,\"resourceType\":\"microsoft.operationalinsights/workspaces\"},\"name\":\"high-risk-grid\"},{\"type\":3,\"content\":{\"version\":\"KqlItem/1.0\",\"query\":\"fxdr_role_change_actor_baseline({TimeRange})\\n| take 50\",\"size\":0,\"title\":\"Actor Baseline\",\"queryType\":0,\"resourceType\":\"microsoft.operationalinsights/workspaces\"},\"name\":\"baseline-grid\"}],\"isLocked\":false,\"fallbackResourceIds\":[\"Azure Monitor\"]}"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2022-10-01",
+      "name": "[concat(parameters('workspaceName'), '/', variables('functionNormalizedName'))]",
+      "properties": {
+        "etag": "*",
+        "displayName": "fxdr_role_changes_normalized",
+        "category": "Security",
+        "query": "[variables('normalizedFunctionQuery')]",
+        "functionAlias": "fxdr_role_changes_normalized",
+        "functionParameters": "lookback:timespan=30d",
+        "version": 1
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2022-10-01",
+      "name": "[concat(parameters('workspaceName'), '/', variables('functionHighRiskName'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspaceName'), variables('functionNormalizedName'))]"
+      ],
+      "properties": {
+        "etag": "*",
+        "displayName": "fxdr_role_changes_high_risk",
+        "category": "Security",
+        "query": "[variables('highRiskFunctionQuery')]",
+        "functionAlias": "fxdr_role_changes_high_risk",
+        "functionParameters": "lookback:timespan=30d",
+        "version": 1
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2022-10-01",
+      "name": "[concat(parameters('workspaceName'), '/', variables('functionBaselineName'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspaceName'), variables('functionNormalizedName'))]"
+      ],
+      "properties": {
+        "etag": "*",
+        "displayName": "fxdr_role_change_actor_baseline",
+        "category": "Security",
+        "query": "[variables('baselineFunctionQuery')]",
+        "functionAlias": "fxdr_role_change_actor_baseline",
+        "functionParameters": "lookback:timespan=30d",
+        "version": 1
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/watchlists",
+      "condition": "[parameters('deployWatchlists')]",
+      "apiVersion": "2024-03-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', variables('watchlistApprovedAdminsAlias'))]",
+      "properties": {
+        "displayName": "Approved Defender Admins",
+        "provider": "Custom",
+        "source": "Local file",
+        "description": "Approved identities allowed to perform privileged Defender XDR admin role assignments.",
+        "itemsSearchKey": "Admin",
+        "contentType": "text/csv",
+        "numberOfLinesToSkip": 0,
+        "rawContent": "Admin,DisplayName,Notes\nadmin1@contoso.com,Defender Security Admin,Example approved privileged actor"
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/watchlists",
+      "condition": "[parameters('deployWatchlists')]",
+      "apiVersion": "2024-03-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', variables('watchlistMaintenanceAlias'))]",
+      "properties": {
+        "displayName": "Approved Maintenance Window",
+        "provider": "Custom",
+        "source": "Local file",
+        "description": "Approved maintenance window used for Defender XDR role change governance.",
+        "itemsSearchKey": "Window",
+        "contentType": "text/csv",
+        "numberOfLinesToSkip": 0,
+        "rawContent": "Window,WindowStartUtc,WindowEndUtc,Notes\ndefault,02:00,04:00,Approved daily maintenance window in UTC"
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/watchlists",
+      "condition": "[parameters('deployWatchlists')]",
+      "apiVersion": "2024-03-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', variables('watchlistUrbacNamesAlias'))]",
+      "properties": {
+        "displayName": "URBAC Role Names",
+        "provider": "Custom",
+        "source": "Local file",
+        "description": "Maps Defender XDR Unified RBAC RoleDefinitionId GUIDs to friendly role names (not present in the audit log).",
+        "itemsSearchKey": "RoleDefinitionId",
+        "contentType": "text/csv",
+        "numberOfLinesToSkip": 0,
+        "rawContent": "RoleDefinitionId,RoleName,Notes\n00000000-0000-0000-0000-000000000000,Example URBAC role,Replace with your RoleDefinitionId to friendly-name mapping"
+      }
+    },
+    {
+      "type": "Microsoft.Insights/workbooks",
+      "apiVersion": "2023-06-01",
+      "name": "[variables('workbookResourceName')]",
+      "location": "[parameters('location')]",
+      "kind": "shared",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspaceName'), variables('functionNormalizedName'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspaceName'), variables('functionHighRiskName'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspaceName'), variables('functionBaselineName'))]"
+      ],
+      "properties": {
+        "displayName": "[parameters('workbookDisplayName')]",
+        "description": "Sentinel workbook for Defender XDR admin role change monitoring.",
+        "category": "sentinel",
+        "sourceId": "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('workspaceName'))]",
+        "serializedData": "[variables('workbookSerializedData')]",
+        "version": "1.0"
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "condition": "[and(parameters('deployAnalyticsRules'), parameters('deployWatchlists'))]",
+      "apiVersion": "2024-01-01-preview",
+      "kind": "Scheduled",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', variables('ruleUnapprovedHighRiskName'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspaceName'), variables('functionHighRiskName'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', variables('watchlistApprovedAdminsAlias'))]"
+      ],
+      "properties": {
+        "displayName": "Defender XDR High-Risk Role Assignment by Unapproved Actor",
+        "description": "Detects high-risk Defender XDR or Entra role changes made by actors not in the approved admin watchlist.",
+        "enabled": true,
+        "query": "fxdr_role_changes_high_risk()",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT24H",
+        "severity": "High",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "Persistence",
+          "PrivilegeEscalation"
+        ],
+        "techniques": [
+          "T1098"
+        ],
+        "eventGroupingSettings": {
+          "aggregationKind": "SingleAlert"
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": false,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": [],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "condition": "[and(parameters('deployAnalyticsRules'), parameters('deployWatchlists'))]",
+      "apiVersion": "2024-01-01-preview",
+      "kind": "Scheduled",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', variables('ruleOutsideWindowName'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspaceName'), variables('functionNormalizedName'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', variables('watchlistMaintenanceAlias'))]"
+      ],
+      "properties": {
+        "displayName": "Defender XDR Role Assignment Outside Approved Maintenance Window",
+        "description": "Detects Defender XDR role assignments that happen outside the approved maintenance window watchlist.",
+        "enabled": true,
+        "query": "[concat('let win = _GetWatchlist(\"', variables('watchlistMaintenanceAlias'), '\") | where SearchKey == \"default\" | take 1; let StartMin = toscalar(win | extend p = split(tostring(column_ifexists(\"WindowStartUtc\", \"02:00\")), \":\") | project toint(p[0]) * 60 + toint(p[1])); let EndMin = toscalar(win | extend p = split(tostring(column_ifexists(\"WindowEndUtc\", \"04:00\")), \":\") | project toint(p[0]) * 60 + toint(p[1])); fxdr_role_changes_normalized() | extend MinOfDay = hourofday(TimeGenerated) * 60 + datetime_part(\"minute\", TimeGenerated) | where MinOfDay < StartMin or MinOfDay > EndMin')]",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT24H",
+        "severity": "Medium",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "Persistence"
+        ],
+        "techniques": [
+          "T1078"
+        ],
+        "eventGroupingSettings": {
+          "aggregationKind": "SingleAlert"
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": false,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": [],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    }
+  ],
+  "outputs": {
+    "workbookResourceId": {
+      "type": "string",
+      "value": "[resourceId('Microsoft.Insights/workbooks', variables('workbookResourceName'))]"
+    }
+  }
+}
+

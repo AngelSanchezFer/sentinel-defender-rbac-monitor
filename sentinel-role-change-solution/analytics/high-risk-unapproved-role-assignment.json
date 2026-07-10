@@ -1,0 +1,18 @@
+{
+  "displayName": "Defender XDR High-Risk Role Assignment by Unapproved Actor",
+  "description": "Triggers when high-risk Defender XDR or Entra role changes are executed by identities not present in the approved-defender-admins watchlist.",
+  "severity": "High",
+  "queryFrequency": "PT1H",
+  "queryPeriod": "PT24H",
+  "triggerOperator": "GreaterThan",
+  "triggerThreshold": 0,
+  "tactics": [
+    "Persistence",
+    "PrivilegeEscalation"
+  ],
+  "techniques": [
+    "T1098"
+  ],
+  "query": "fxdr_role_changes_high_risk()"
+}
+

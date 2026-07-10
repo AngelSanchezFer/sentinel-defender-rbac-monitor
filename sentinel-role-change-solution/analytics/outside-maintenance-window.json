@@ -1,0 +1,17 @@
+{
+  "displayName": "Defender XDR Role Assignment Outside Approved Maintenance Window",
+  "description": "Triggers when Defender XDR admin role changes occur outside of approved maintenance windows defined in approved-maintenance-window watchlist.",
+  "severity": "Medium",
+  "queryFrequency": "PT1H",
+  "queryPeriod": "PT24H",
+  "triggerOperator": "GreaterThan",
+  "triggerThreshold": 0,
+  "tactics": [
+    "Persistence"
+  ],
+  "techniques": [
+    "T1078"
+  ],
+  "query": "let win = _GetWatchlist(\"approved-maintenance-window\") | where SearchKey == \"default\" | take 1; let StartMin = toscalar(win | extend p = split(tostring(column_ifexists(\"WindowStartUtc\", \"02:00\")), \":\") | project toint(p[0]) * 60 + toint(p[1])); let EndMin = toscalar(win | extend p = split(tostring(column_ifexists(\"WindowEndUtc\", \"04:00\")), \":\") | project toint(p[0]) * 60 + toint(p[1])); fxdr_role_changes_normalized() | extend MinOfDay = hourofday(TimeGenerated) * 60 + datetime_part(\"minute\", TimeGenerated) | where MinOfDay < StartMin or MinOfDay > EndMin"
+}
+
